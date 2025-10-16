@@ -67,31 +67,41 @@ const Form: React.FC = () => {
       // For now server returns placeholder; when OCR implemented, data.text will contain recognized text
       console.log('OCR response:', data);
 
-      // The server now forwards OCR to the AI and returns mapping under data.ai (generatedText)
-      if (data?.success && data.ai && data.ai.generatedText) {
-        const generated = data.ai.generatedText;
-        // generated may contain JSON string; try to parse safely
+      // The server now forwards OCR to the AI and returns mapping under data.ai
+      // Prefer structured extractedFields when available, otherwise try to parse generatedText
+  // Some server implementations return `ai` or `aiData` — support both
+  const ai = data?.ai ?? data?.aiData;
+      let mapped: Partial<typeof formData> | null = null;
+
+      if (ai?.extractedFields && typeof ai.extractedFields === 'object') {
+        mapped = ai.extractedFields;
+      } else if (ai?.generatedText && typeof ai.generatedText === 'string') {
         try {
-          const parsed = JSON.parse(generated);
-          // Map parsed values into form state (only known keys)
-          setFormData(prev => ({
-            ...prev,
-            transactionRole: parsed.transactionRole ?? prev.transactionRole,
-            amount: parsed.amount ?? prev.amount,
-            paymentTerms: parsed.paymentTerms ?? prev.paymentTerms,
-            lcType: parsed.lcType ?? prev.lcType,
-            isLcIssued: parsed.isLcIssued ?? prev.isLcIssued,
-            issuingBank: parsed.issuingBank ?? prev.issuingBank,
-            confirmingBanks: parsed.confirmingBanks ?? prev.confirmingBanks,
-            productDescription: parsed.productDescription ?? prev.productDescription,
-            importerName: parsed.importerName ?? prev.importerName,
-            exporterName: parsed.exporterName ?? prev.exporterName,
-            confirmationCharges: parsed.confirmationCharges ?? prev.confirmationCharges,
-            lastDateForReceivingBids: parsed.lastDateForReceivingBids ?? prev.lastDateForReceivingBids,
-          }));
+          const parsed = JSON.parse(ai.generatedText);
+          if (parsed && typeof parsed === 'object') mapped = parsed;
         } catch (parseErr) {
-          console.error('Failed to parse AI mapping JSON', parseErr, 'generated:', generated);
+          console.warn('AI generatedText is not valid JSON, skipping parse.', parseErr);
         }
+      }
+
+      if (mapped) {
+        const isNonEmpty = (v: unknown) => v !== null && v !== undefined && !(typeof v === 'string' && v.trim() === '');
+
+        setFormData(prev => ({
+          ...prev,
+          transactionRole: isNonEmpty(mapped.transactionRole) ? String(mapped.transactionRole) : prev.transactionRole,
+          amount: isNonEmpty(mapped.amount) ? String(mapped.amount) : prev.amount,
+          paymentTerms: isNonEmpty(mapped.paymentTerms) ? String(mapped.paymentTerms) : prev.paymentTerms,
+          lcType: isNonEmpty(mapped.lcType) ? String(mapped.lcType) : prev.lcType,
+          isLcIssued: isNonEmpty(mapped.isLcIssued) ? String(mapped.isLcIssued) : prev.isLcIssued,
+          issuingBank: isNonEmpty(mapped.issuingBank) ? String(mapped.issuingBank) : prev.issuingBank,
+          confirmingBanks: isNonEmpty(mapped.confirmingBanks) ? String(mapped.confirmingBanks) : prev.confirmingBanks,
+          productDescription: isNonEmpty(mapped.productDescription) ? String(mapped.productDescription) : prev.productDescription,
+          importerName: isNonEmpty(mapped.importerName) ? String(mapped.importerName) : prev.importerName,
+          exporterName: isNonEmpty(mapped.exporterName) ? String(mapped.exporterName) : prev.exporterName,
+          confirmationCharges: isNonEmpty(mapped.confirmationCharges) ? String(mapped.confirmationCharges) : prev.confirmationCharges,
+          lastDateForReceivingBids: isNonEmpty(mapped.lastDateForReceivingBids) ? String(mapped.lastDateForReceivingBids) : prev.lastDateForReceivingBids,
+        }));
       }
     } catch (err) {
       console.error('Upload failed', err);
@@ -133,16 +143,16 @@ const Form: React.FC = () => {
         <label htmlFor="transactionRole" className="block text-sm font-medium text-gray-700">
           In this transaction you are:
         </label>
-        <select
+        <input
+          type="text"
           name="transactionRole"
           id="transactionRole"
           value={formData.transactionRole}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white"
-        >
-          <option value="exporter">Exporter/Supplier (Beneficiary)</option>
-          <option value="importer">Importer (Applicant)</option>
-        </select>
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
+          placeholder="Exporter/Supplier (Beneficiary) or Importer (Applicant)"
+        />
       </div>
 
       {/* Amount */}
@@ -151,13 +161,14 @@ const Form: React.FC = () => {
           Amount:
         </label>
         <input
-          type="number"
+          type="text"
           id="amount"
           name="amount"
           value={formData.amount}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
-          placeholder="Enter Amount"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
+          placeholder="Enter Amount (e.g. 100.000,OO USD)"
         />
       </div>
 
@@ -172,7 +183,8 @@ const Form: React.FC = () => {
           name="paymentTerms"
           value={formData.paymentTerms}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
           placeholder="e.g., Sight LC, Usance LC"
         />
       </div>
@@ -182,16 +194,16 @@ const Form: React.FC = () => {
         <label htmlFor="lcType" className="block text-sm font-medium text-gray-700">
           LC Type:
         </label>
-        <select
-          name="lcType"
+        <input
+          type="text"
           id="lcType"
+          name="lcType"
           value={formData.lcType}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
-        >
-          <option value="local">Local</option>
-          <option value="international">International</option>
-        </select>
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
+          placeholder="e.g., Local or International"
+        />
       </div>
 
       {/* Is LC Issued */}
@@ -205,7 +217,8 @@ const Form: React.FC = () => {
           name="isLcIssued"
           value={formData.isLcIssued}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
           placeholder="Yes or No"
         />
       </div>
@@ -221,7 +234,8 @@ const Form: React.FC = () => {
           name="issuingBank"
           value={formData.issuingBank}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
           placeholder="Enter Issuing Bank"
         />
       </div>
@@ -237,7 +251,8 @@ const Form: React.FC = () => {
           name="productDescription"
           value={formData.productDescription}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
           placeholder="Enter product description"
         />
       </div>
@@ -253,7 +268,8 @@ const Form: React.FC = () => {
           name="importerName"
           value={formData.importerName}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
           placeholder="Enter Importer Name"
         />
       </div>
@@ -269,7 +285,8 @@ const Form: React.FC = () => {
           name="exporterName"
           value={formData.exporterName}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white placeholder-gray-400"
+          style={{ color: '#111', backgroundColor: '#fff' }}
           placeholder="Enter Exporter Name"
         />
       </div>
@@ -283,7 +300,8 @@ const Form: React.FC = () => {
           type="file"
           name="attachments"
           onChange={handleChange}
-          className="mt-2 block w-full"
+          className="mt-2 block w-full text-gray-900 bg-white"
+          style={{ color: '#111', backgroundColor: '#fff' }}
         />
       </div>
 
@@ -298,7 +316,8 @@ const Form: React.FC = () => {
           name="lastDateForReceivingBids"
           value={formData.lastDateForReceivingBids}
           onChange={handleChange}
-          className="mt-2 block w-full rounded-md border-gray-300"
+          className="mt-2 block w-full rounded-md border-gray-300 text-gray-900 bg-white"
+          style={{ color: '#111', backgroundColor: '#fff' }}
         />
       </div>
 
