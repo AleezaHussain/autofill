@@ -1,4 +1,3 @@
-import axios from 'axios';
 import { NextResponse, NextRequest } from 'next/server';
 
 export async function POST(request: NextRequest) {
@@ -30,19 +29,38 @@ export async function POST(request: NextRequest) {
     ocrFormData.append('apikey', ocrApiKey); // Your OCR.space API key
     ocrFormData.append('language', 'eng'); // Language (English in this case)
 
-    // Make the request to OCR.space API
-    const response = await axios.post('https://api.ocr.space/parse/image', ocrFormData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    // Use fetch for OCR.space request (more reliable in Node/Edge runtime)
+    let ocrText = '';
+    try {
+      const ocrResp = await fetch('https://api.ocr.space/parse/image', {
+        method: 'POST',
+        body: ocrFormData,
+      });
 
-    // Extract the OCR text from the response
-    const ocrText = response.data.ParsedResults[0].ParsedText;
+      const ocrBody = await ocrResp.text();
+      let ocrJson: any = null;
+      try {
+        ocrJson = JSON.parse(ocrBody);
+      } catch (parseErr) {
+        console.error('OCR.space returned non-JSON response', { status: ocrResp.status, body: ocrBody });
+        return NextResponse.json({ success: false, message: 'OCR service returned non-JSON', raw: ocrBody }, { status: 502 });
+      }
+
+      if (!ocrResp.ok || !ocrJson.ParsedResults || !ocrJson.ParsedResults[0]) {
+        console.error('OCR.space error', { status: ocrResp.status, body: ocrJson });
+        return NextResponse.json({ success: false, message: 'OCR failed', raw: ocrJson }, { status: 502 });
+      }
+
+      ocrText = ocrJson.ParsedResults[0].ParsedText || '';
+    } catch (ocrErr) {
+      console.error('Failed to call OCR.space', ocrErr);
+      return NextResponse.json({ success: false, message: 'OCR request failed', error: String(ocrErr) }, { status: 502 });
+    }
 
     // Trigger the second API call to process and format the OCR text
-    const baseUrl = (process.env.NEXT_PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
-    const aiUrl = `${baseUrl}/api/ai`;
+  // Derive base URL from the incoming request so deployments don't need NEXT_PUBLIC_BASE_URL
+  const origin = new URL(request.url).origin;
+  const aiUrl = `${origin.replace(/\/$/, '')}/api/ai`;
 
     const aiResponse = await fetch(aiUrl, {
       method: 'POST',
