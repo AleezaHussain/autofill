@@ -36,6 +36,7 @@ const Form: React.FC = () => {
     attachments: null,
     lastDateForReceivingBids: ''
   });
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value, files, type } = e.target as HTMLInputElement;
@@ -60,10 +61,18 @@ const Form: React.FC = () => {
 
   async function uploadTopImage(file: File) {
     try {
+      // Clear previous upload error
+      setUploadError(null);
       const body = new FormData();
       body.append('topImage', file);
       const res = await fetch('/api/imagetotext', { method: 'POST', body });
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data) {
+        const msg = (data && data.message) || `Failed to fetch OCR (${res.status})`;
+        console.error('OCR upload error', msg, data);
+        setUploadError(msg);
+        return;
+      }
       // For now server returns placeholder; when OCR implemented, data.text will contain recognized text
       console.log('OCR response:', data);
 
@@ -105,11 +114,32 @@ const Form: React.FC = () => {
       }
     } catch (err) {
       console.error('Upload failed', err);
+      setUploadError('Upload failed — could not reach OCR service');
     }
   }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4 max-w-4xl mx-auto p-4 bg-gray-100">
+      {/* OCR upload error banner */}
+      {uploadError && (
+        <div className="p-3 bg-red-100 border border-red-300 text-red-800 rounded">
+          <div className="flex items-center justify-between">
+            <div>{uploadError}</div>
+            <div className="ml-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadError(null);
+                  topImageRef.current?.click();
+                }}
+                className="px-3 py-1 bg-red-600 text-white rounded"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Top Image Upload */}
       <div>
         <label htmlFor="topImage" className="block text-sm font-medium text-gray-700">

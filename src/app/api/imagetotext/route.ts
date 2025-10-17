@@ -29,39 +29,68 @@ export async function POST(request: NextRequest) {
     ocrFormData.append('apikey', ocrApiKey); // Your OCR.space API key
     ocrFormData.append('language', 'eng'); // Language (English in this case)
 
-    // Use fetch for OCR.space request (more reliable in Node/Edge runtime)
-    let ocrText = '';
+    // Make the request to OCR.space API using fetch (works better with Fetch/FormData on Node/Next.js)
+    const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
+      method: 'POST',
+      body: ocrFormData,
+    });
+
+    let ocrJson: unknown = null;
     try {
-      const ocrResp = await fetch('https://api.ocr.space/parse/image', {
-        method: 'POST',
-        body: ocrFormData,
-      });
+      ocrJson = await ocrResponse.json();
+    } catch {
+      const raw = await ocrResponse.text().catch(() => '<no-body>');
+      console.error('Failed to parse OCR.space response as JSON', raw);
+      return NextResponse.json({ success: false, message: 'Invalid OCR response', ocrRaw: raw }, { status: 502 });
+    }
 
-      const ocrBody = await ocrResp.text();
-      let ocrJson: unknown = null;
-      try {
-        ocrJson = JSON.parse(ocrBody);
-      } catch {
-        console.error('OCR.space returned non-JSON response', { status: ocrResp.status, body: ocrBody });
-        return NextResponse.json({ success: false, message: 'OCR service returned non-JSON', raw: ocrBody }, { status: 502 });
+    // Log a truncated version of OCR.space response for debugging
+    try {
+      console.log('OCR.space response (truncated):', JSON.stringify(ocrJson).slice(0, 2000));
+    } catch {
+      // ignore
+    }
+
+    // Collect debugable fields from OCR.space response if present
+    const ocrDebug: Record<string, unknown> = {
+      status: ocrResponse.status,
+      headers: Array.from(ocrResponse.headers.entries()).slice(0, 10),
+    };
+
+    if (ocrJson && typeof ocrJson === 'object' && ocrJson !== null) {
+      const oj = ocrJson as Record<string, unknown>;
+      ocrDebug.OCRExitCode = oj.OCRExitCode;
+      ocrDebug.IsErroredOnProcessing = oj.IsErroredOnProcessing;
+      ocrDebug.ErrorMessage = oj.ErrorMessage;
+      ocrDebug.ProcessingTimeInMilliseconds = oj.ProcessingTimeInMilliseconds;
+    }
+
+    // Validate ParsedResults exists
+    if (!ocrJson || typeof ocrJson !== 'object' || ocrJson === null) {
+      console.error('OCR.space returned invalid JSON', ocrDebug);
+      return NextResponse.json({ success: false, message: 'OCR returned invalid JSON', ocrDebug }, { status: 502 });
+    }
+
+    const oj = ocrJson as Record<string, unknown>;
+    const parsedResults = oj['ParsedResults'];
+    if (!parsedResults || !Array.isArray(parsedResults) || parsedResults.length === 0) {
+      console.error('OCR.space returned no ParsedResults', ocrDebug);
+      return NextResponse.json({ success: false, message: 'OCR returned no parsed results', ocrDebug }, { status: 502 });
+    }
+
+    // Extract the OCR text from the response safely
+    const firstResult = parsedResults[0];
+    let ocrText = '';
+    if (firstResult && typeof firstResult === 'object') {
+      const fr = firstResult as Record<string, unknown>;
+      if (fr['ParsedText'] !== undefined && fr['ParsedText'] !== null) {
+        ocrText = String(fr['ParsedText']);
       }
-
-      const parsed = (ocrJson as { ParsedResults?: Array<{ ParsedText?: string }> } | null) ?? null;
-      if (!ocrResp.ok || !parsed || !parsed.ParsedResults || !parsed.ParsedResults[0]) {
-        console.error('OCR.space error', { status: ocrResp.status, body: ocrJson });
-        return NextResponse.json({ success: false, message: 'OCR failed', raw: ocrJson }, { status: 502 });
-      }
-
-      ocrText = parsed.ParsedResults[0].ParsedText || '';
-    } catch (ocrErr) {
-      console.error('Failed to call OCR.space', ocrErr);
-      return NextResponse.json({ success: false, message: 'OCR request failed', error: String(ocrErr) }, { status: 502 });
     }
 
     // Trigger the second API call to process and format the OCR text
-  // Derive base URL from the incoming request so deployments don't need NEXT_PUBLIC_BASE_URL
-  const origin = new URL(request.url).origin;
-  const aiUrl = `${origin.replace(/\/$/, '')}/api/ai`;
+    const baseUrl = (process.env.NEXT_PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
+    const aiUrl = `${baseUrl}/api/ai`;
 
     const aiResponse = await fetch(aiUrl, {
       method: 'POST',
