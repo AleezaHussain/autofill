@@ -1,7 +1,7 @@
 import axios from 'axios';
-import { NextResponse } from 'next/server';
+import { NextResponse, NextRequest } from 'next/server';
 
-export async function POST(request) {
+export async function POST(request: NextRequest) {
   try {
     // Get the uploaded image from the form data
     const formData = await request.formData();
@@ -81,15 +81,15 @@ Provide the extracted data in a valid JSON format.`
       return NextResponse.json({ success: false, message: 'AI processing failed', aiRaw: raw }, { status: 502 });
     }
 
-    // Parse JSON safely
-    let aiData: any;
+  // Parse JSON safely
+  let aiData: unknown;
     const contentType = aiResponse.headers.get('content-type') || '';
     if (contentType.includes('application/json')) {
       try {
         aiData = await aiResponse.json();
-      } catch (err) {
+      } catch (parseErr) {
         const raw = await aiResponse.text().catch(() => '<no-body>');
-        console.error('Failed to parse AI JSON response', err, raw);
+        console.error('Failed to parse AI JSON response', parseErr, raw);
         return NextResponse.json({ success: false, message: 'Invalid AI JSON response', aiRaw: raw }, { status: 502 });
       }
     } else {

@@ -67,20 +67,22 @@ export async function POST(request: Request) {
 }
 
 // Function to parse the extracted fields from JSON response
-function parseFields(parsed: any): ExtractedFields {
+function parseFields(parsed: unknown): ExtractedFields {
+  const p = (parsed as Record<string, unknown> | null) ?? {};
+
   return {
-    transactionRole: String(parsed.transactionRole ?? ''),
-    amount: String(parsed.amount ?? ''),
-    paymentTerms: String(parsed.paymentTerms ?? ''),
-    lcType: String(parsed.lcType ?? ''),
-    isLcIssued: String(parsed.isLcIssued ?? ''),
-    issuingBank: String(parsed.issuingBank ?? ''),
-    confirmingBanks: String(parsed.confirmingBanks ?? ''),
-    productDescription: String(parsed.productDescription ?? ''),
-    importerName: String(parsed.importerName ?? ''),
-    exporterName: String(parsed.exporterName ?? ''),
-    confirmationCharges: String(parsed.confirmationCharges ?? ''),
-    lastDateForReceivingBids: String(parsed.lastDateForReceivingBids ?? ''),
+    transactionRole: String((p['transactionRole'] as string) ?? ''),
+    amount: String((p['amount'] as string) ?? ''),
+    paymentTerms: String((p['paymentTerms'] as string) ?? ''),
+    lcType: String((p['lcType'] as string) ?? ''),
+    isLcIssued: String((p['isLcIssued'] as string) ?? ''),
+    issuingBank: String((p['issuingBank'] as string) ?? ''),
+    confirmingBanks: String((p['confirmingBanks'] as string) ?? ''),
+    productDescription: String((p['productDescription'] as string) ?? ''),
+    importerName: String((p['importerName'] as string) ?? ''),
+    exporterName: String((p['exporterName'] as string) ?? ''),
+    confirmationCharges: String((p['confirmationCharges'] as string) ?? ''),
+    lastDateForReceivingBids: String((p['lastDateForReceivingBids'] as string) ?? ''),
   };
 }
 
@@ -127,15 +129,15 @@ function parseExtractedData(generatedText: string): ExtractedFields {
 }
 
 // Try to parse JSON strictly
-function tryParseJSON(text: string): any | null {
+function tryParseJSON(text: string): unknown | null {
   try {
     return JSON.parse(text);
-  } catch (_err) {
+  } catch {
     const match = text.match(/\{[\s\S]*\}/);
     if (match) {
       try {
         return JSON.parse(match[0]);
-      } catch (_err2) {
+      } catch {
         return null;
       }
     }
