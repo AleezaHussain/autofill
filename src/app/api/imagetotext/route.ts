@@ -38,20 +38,21 @@ export async function POST(request: NextRequest) {
       });
 
       const ocrBody = await ocrResp.text();
-      let ocrJson: any = null;
+      let ocrJson: unknown = null;
       try {
         ocrJson = JSON.parse(ocrBody);
-      } catch (parseErr) {
+      } catch {
         console.error('OCR.space returned non-JSON response', { status: ocrResp.status, body: ocrBody });
         return NextResponse.json({ success: false, message: 'OCR service returned non-JSON', raw: ocrBody }, { status: 502 });
       }
 
-      if (!ocrResp.ok || !ocrJson.ParsedResults || !ocrJson.ParsedResults[0]) {
+      const parsed = (ocrJson as { ParsedResults?: Array<{ ParsedText?: string }> } | null) ?? null;
+      if (!ocrResp.ok || !parsed || !parsed.ParsedResults || !parsed.ParsedResults[0]) {
         console.error('OCR.space error', { status: ocrResp.status, body: ocrJson });
         return NextResponse.json({ success: false, message: 'OCR failed', raw: ocrJson }, { status: 502 });
       }
 
-      ocrText = ocrJson.ParsedResults[0].ParsedText || '';
+      ocrText = parsed.ParsedResults[0].ParsedText || '';
     } catch (ocrErr) {
       console.error('Failed to call OCR.space', ocrErr);
       return NextResponse.json({ success: false, message: 'OCR request failed', error: String(ocrErr) }, { status: 502 });
