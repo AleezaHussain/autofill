@@ -1,156 +1,102 @@
 import { NextResponse, NextRequest } from 'next/server';
+import AWS from 'aws-sdk';
+import { OpenAI } from 'openai';
+
+// Initialize AWS Textract and OpenAI client
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,   // Your AWS Access Key ID
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY, // Your AWS Secret Access Key
+  region: 'us-east-1', // Your AWS region
+});
+
+const textract = new AWS.Textract();
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,  // Your OpenAI API Key
+});
 
 export async function POST(request: NextRequest) {
   try {
+    // Log incoming request
+    console.log("Incoming request...");
+
     // Get the uploaded image from the form data
     const formData = await request.formData();
     const fileEntry = formData.get('topImage');
 
     if (!fileEntry) {
+      console.log('No file uploaded');
       return NextResponse.json({ success: false, message: 'No file uploaded' }, { status: 400 });
     }
 
     // Ensure the entry is a File/Blob before calling arrayBuffer()
     if (typeof fileEntry === 'string') {
+      console.log('Invalid file uploaded');
       return NextResponse.json({ success: false, message: 'Invalid file uploaded' }, { status: 400 });
     }
 
     // Convert the File/Blob to a buffer
     const buffer = Buffer.from(await fileEntry.arrayBuffer());
+    console.log('File converted to buffer successfully');
 
-    // Prepare the form data for the OCR.space API
-    const ocrApiKey = process.env.OCR_SPACE_API_KEY;
-    if (!ocrApiKey) {
-      return NextResponse.json({ success: false, message: 'OCR API key not configured' }, { status: 500 });
-    }
-
-    const ocrFormData = new FormData();
-    ocrFormData.append('file', new Blob([buffer]), 'image.jpg');
-    ocrFormData.append('apikey', ocrApiKey); // Your OCR.space API key
-    ocrFormData.append('language', 'eng'); // Language (English in this case)
-
-    // Make the request to OCR.space API using fetch (works better with Fetch/FormData on Node/Next.js)
-    const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
-      method: 'POST',
-      body: ocrFormData,
-    });
-
-    let ocrJson: unknown = null;
-    try {
-      ocrJson = await ocrResponse.json();
-    } catch {
-      const raw = await ocrResponse.text().catch(() => '<no-body>');
-      console.error('Failed to parse OCR.space response as JSON', raw);
-      return NextResponse.json({ success: false, message: 'Invalid OCR response', ocrRaw: raw }, { status: 502 });
-    }
-
-    // Log a truncated version of OCR.space response for debugging
-    try {
-      console.log('OCR.space response (truncated):', JSON.stringify(ocrJson).slice(0, 2000));
-    } catch {
-      // ignore
-    }
-
-    // Collect debugable fields from OCR.space response if present
-    const ocrDebug: Record<string, unknown> = {
-      status: ocrResponse.status,
-      headers: Array.from(ocrResponse.headers.entries()).slice(0, 10),
+    // Upload image to Amazon Textract (as base64 or buffer)
+    const params = {
+      Document: {
+        Bytes: buffer,
+      },
     };
 
-    if (ocrJson && typeof ocrJson === 'object' && ocrJson !== null) {
-      const oj = ocrJson as Record<string, unknown>;
-      ocrDebug.OCRExitCode = oj.OCRExitCode;
-      ocrDebug.IsErroredOnProcessing = oj.IsErroredOnProcessing;
-      ocrDebug.ErrorMessage = oj.ErrorMessage;
-      ocrDebug.ProcessingTimeInMilliseconds = oj.ProcessingTimeInMilliseconds;
+    // Call Amazon Textract for text extraction
+    console.log('Calling Amazon Textract...');
+    const textractResponse = await textract.detectDocumentText(params).promise();
+
+    console.log('Textract response received', textractResponse);
+
+    // Extract text from the response (guarding for possibly undefined Blocks)
+    const blocks = Array.isArray(textractResponse?.Blocks) ? textractResponse.Blocks : [];
+    const extractedText = blocks
+      .filter((block: unknown) => {
+        if (!block || typeof block !== 'object') return false;
+        const b = block as { BlockType?: unknown; Text?: unknown };
+        return b.BlockType === 'LINE' && typeof b.Text === 'string';
+      })
+      .map((block: unknown) => (block as { Text?: string }).Text || '')
+      .join('\n'); // Join all extracted lines into one string
+
+    if (!extractedText) {
+      console.log('No text extracted from the image');
+      return NextResponse.json({ success: false, message: 'No text extracted from the image' }, { status: 400 });
     }
 
-    // Validate ParsedResults exists
-    if (!ocrJson || typeof ocrJson !== 'object' || ocrJson === null) {
-      console.error('OCR.space returned invalid JSON', ocrDebug);
-      return NextResponse.json({ success: false, message: 'OCR returned invalid JSON', ocrDebug }, { status: 502 });
+    // If extracted text is too short, treat it as a failure so the client displays an error
+    const wordCount = String(extractedText).trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount < 3) {
+      console.log('Extracted text too short, failing with 400', { extractedText, wordCount });
+      return NextResponse.json({ success: false, message: 'Extracted text too short' }, { status: 400 });
     }
 
-    const oj = ocrJson as Record<string, unknown>;
-    const parsedResults = oj['ParsedResults'];
-    if (!parsedResults || !Array.isArray(parsedResults) || parsedResults.length === 0) {
-      console.error('OCR.space returned no ParsedResults', ocrDebug);
-      return NextResponse.json({ success: false, message: 'OCR returned no parsed results', ocrDebug }, { status: 502 });
-    }
+    console.log('Extracted Text:', extractedText);
 
-    // Extract the OCR text from the response safely
-    const firstResult = parsedResults[0];
-    let ocrText = '';
-    if (firstResult && typeof firstResult === 'object') {
-      const fr = firstResult as Record<string, unknown>;
-      if (fr['ParsedText'] !== undefined && fr['ParsedText'] !== null) {
-        ocrText = String(fr['ParsedText']);
-      }
-    }
-
-    // Trigger the second API call to process and format the OCR text
-    const baseUrl = (process.env.NEXT_PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
-    const aiUrl = `${baseUrl}/api/ai`;
-
-    const aiResponse = await fetch(aiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        data: ocrText,
-        prompt: `Please extract and map the following fields from the text below:
-
-- transactionRole
-- amount
-- paymentTerms
-- lcType
-- isLcIssued
-- issuingBank
-- confirmingBanks
-- productDescription
-- importerName
-- exporterName
-- confirmationCharges
-- lastDateForReceivingBids
-
-Here is the OCR text:
-"""
-${ocrText}
-"""
-Provide the extracted data in a valid JSON format.`
-      }),
+    // Send the extracted text to OpenAI for processing
+    console.log('Sending extracted text to OpenAI...');
+    const openaiResponse = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: 'You are an assistant that processes OCR-extracted text.' },
+        { role: 'user', content: extractedText },
+      ],
     });
 
-    // If AI endpoint failed, capture raw body for debugging
-    if (!aiResponse.ok) {
-      const raw = await aiResponse.text().catch(() => '<no-body>');
-      console.error('AI route error', aiResponse.status, raw);
-      return NextResponse.json({ success: false, message: 'AI processing failed', aiRaw: raw }, { status: 502 });
-    }
+    console.log('OpenAI response received', openaiResponse);
 
-  // Parse JSON safely
-  let aiData: unknown;
-    const contentType = aiResponse.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      try {
-        aiData = await aiResponse.json();
-      } catch (parseErr) {
-        const raw = await aiResponse.text().catch(() => '<no-body>');
-        console.error('Failed to parse AI JSON response', parseErr, raw);
-        return NextResponse.json({ success: false, message: 'Invalid AI JSON response', aiRaw: raw }, { status: 502 });
-      }
-    } else {
-      // Not JSON (maybe HTML error page)
-      const raw = await aiResponse.text().catch(() => '<no-body>');
-      console.error('AI returned non-JSON response', raw);
-      return NextResponse.json({ success: false, message: 'AI returned non-JSON response', aiRaw: raw }, { status: 502 });
-    }
+    // Get the processed text from OpenAI
+    const processedText = openaiResponse.choices[0].message.content;
 
+    // Return extracted and processed text back to the client
     return NextResponse.json({
       success: true,
-      ocrText,
-      aiData,
+      extractedText: processedText, // Text processed by OpenAI
+      // Include assistant choice object for debugging (if available)
+      rawAssistantChoice: openaiResponse?.choices?.[0] ?? null,
     });
   } catch (error) {
     console.error('OCR Error:', error);

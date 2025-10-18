@@ -76,26 +76,86 @@ const Form: React.FC = () => {
       // For now server returns placeholder; when OCR implemented, data.text will contain recognized text
       console.log('OCR response:', data);
 
-      // The server now forwards OCR to the AI and returns mapping under data.ai
-      // Prefer structured extractedFields when available, otherwise try to parse generatedText
-  // Some server implementations return `ai` or `aiData` — support both
-  const ai = data?.ai ?? data?.aiData;
-      let mapped: Partial<typeof formData> | null = null;
+      // The server returns extractedText. Now call the mapping AI route with that text.
+      const extractedText = data?.extractedText ?? data?.text ?? null;
+      if (!extractedText) {
+        console.warn('No extracted text returned from /api/imagetotext', data);
+        setUploadError('No text extracted from image');
+        return;
+      }
 
-      if (ai?.extractedFields && typeof ai.extractedFields === 'object') {
-        mapped = ai.extractedFields;
-      } else if (ai?.generatedText && typeof ai.generatedText === 'string') {
-        try {
-          const parsed = JSON.parse(ai.generatedText);
-          if (parsed && typeof parsed === 'object') mapped = parsed;
-        } catch (parseErr) {
-          console.warn('AI generatedText is not valid JSON, skipping parse.', parseErr);
+      // If extracted text is too short, it's likely an extraction failure; show error and stop
+      const wordCount = (extractedText || '').trim().split(/\s+/).filter(Boolean).length;
+      if (wordCount < 3) {
+        setUploadError('Could not extract usable data from this image (too little text). Try a clearer photo or upload a different document.');
+        return;
+      }
+
+      // Build a clear prompt that includes the extracted text and the current form values
+      const currentFieldsForPrompt = {
+        transactionRole: formData.transactionRole,
+        amount: formData.amount,
+        paymentTerms: formData.paymentTerms,
+        lcType: formData.lcType,
+        isLcIssued: formData.isLcIssued,
+        issuingBank: formData.issuingBank,
+        confirmingBanks: formData.confirmingBanks,
+        productDescription: formData.productDescription,
+        importerName: formData.importerName,
+        exporterName: formData.exporterName,
+        confirmationCharges: formData.confirmationCharges,
+        lastDateForReceivingBids: formData.lastDateForReceivingBids,
+      };
+
+      const prompt = `You are given extracted text from a document and the current form field values. Map the extracted text to the form fields. Only return a JSON object with keys for fields that should be updated (omit fields that should remain unchanged). Allowed keys: transactionRole, amount, paymentTerms, lcType, isLcIssued, issuingBank, confirmingBanks, productDescription, importerName, exporterName, confirmationCharges, lastDateForReceivingBids. Values should be strings. Do not include nulls. Do not add any explanation or extra keys.\n\nEXTRACTED_TEXT:\n${extractedText}\n\nCURRENT_FORM_VALUES:\n${JSON.stringify(currentFieldsForPrompt, null, 2)}\n\nReturn only valid JSON.`;
+
+      // Call mapping endpoint (server-side mapping route uses a strong system prompt as well)
+      const mapRes = await fetch('/api/ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: extractedText, prompt }),
+      });
+      const mapJson = await mapRes.json().catch(() => null);
+      if (!mapRes.ok || !mapJson) {
+        console.error('Mapping failed', mapRes.status, mapJson);
+        setUploadError('Mapping failed');
+        return;
+      }
+
+      // If the assistant returned an explicit failure marker, show a friendly error and stop
+      const assistantRaw: string | null =
+        (mapJson && typeof mapJson.rawAssistant === 'string' && mapJson.rawAssistant) ||
+        (mapJson?.rawAssistantChoice?.message?.content as string) ||
+        (typeof mapJson?.generatedText === 'string' ? mapJson.generatedText : null);
+
+      if (assistantRaw) {
+        // The server is instructed to return the single literal token `error` when it cannot extract or map.
+        if (/^\s*error\s*$/i.test(assistantRaw)) {
+          console.warn('Assistant returned explicit error token:', assistantRaw);
+          setUploadError('Could not extract usable data from this image. Try a clearer photo or upload a different document.');
+          return;
         }
+
+        const failRegex = /sorry[,\s]+your message is not clear|not clear|unable to (?:extract|parse)|cannot (?:extract|parse)|could not extract|no text extracted|i cannot find|i can'?t find/i;
+        if (failRegex.test(assistantRaw)) {
+          console.warn('Assistant indicates extraction failure:', assistantRaw);
+          setUploadError('Could not extract usable data from this image. Try a clearer photo or upload a different document.');
+          return;
+        }
+      }
+
+  // Prefer structured extractedFields when available, otherwise try to parse generatedText
+  let mapped: Partial<typeof formData> | null = null;
+      if (mapJson?.extractedFields && typeof mapJson.extractedFields === 'object') mapped = mapJson.extractedFields;
+      else if (mapJson?.generatedText && typeof mapJson.generatedText === 'string') {
+        try { mapped = JSON.parse(mapJson.generatedText); } catch { mapped = null; }
+      } else if (mapJson && typeof mapJson === 'object') {
+        // maybe the mapping endpoint returned fields directly
+        mapped = mapJson as Partial<typeof formData>;
       }
 
       if (mapped) {
         const isNonEmpty = (v: unknown) => v !== null && v !== undefined && !(typeof v === 'string' && v.trim() === '');
-
         setFormData(prev => ({
           ...prev,
           transactionRole: isNonEmpty(mapped.transactionRole) ? String(mapped.transactionRole) : prev.transactionRole,

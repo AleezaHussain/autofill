@@ -22,30 +22,72 @@ type ExtractedFields = {
 
 export async function POST(request: Request) {
   try {
-    // Parse the incoming JSON data
-    const { data, prompt } = await request.json();
+    // Parse the incoming JSON data - accept text `data`, `imageBase64`, and optional `debug` flag
+  const { data, prompt, imageBase64 } = await request.json();
 
-    if (!data || !prompt) {
+    if (!prompt || (!data && !imageBase64)) {
       return NextResponse.json(
-        { success: false, message: 'Missing data or prompt' },
+        { success: false, message: 'Missing prompt or data/imageBase64' },
         { status: 400 }
       );
     }
 
-    // System message to tell GPT to only extract a valid JSON object
-    const systemMessage = `You are a JSON extractor. Given the user's prompt and OCR text, produce ONLY a single valid JSON object (no surrounding text) with these keys exactly: transactionRole, amount, paymentTerms, lcType, isLcIssued, issuingBank, confirmingBanks, productDescription, importerName, exporterName, confirmationCharges, lastDateForReceivingBids. If a field is not present, set its value to an empty string. Do not include any additional keys.`;
+    // Strong, defensive system prompt with explicit output schema and example
+    const systemMessage = `You are a strict JSON extractor. Follow these rules exactly:\n
+1) If an image (base64) is provided, first extract the full textual content from the image and label that block EXTRACTED_TEXT.\n
+2) After extraction (or if text input was provided), produce ONLY a single, valid JSON object with the exact keys listed below. Do NOT output any explanatory text, bullets, or code fences — ONLY the JSON object.\n
+Keys (must match exactly): transactionRole, amount, paymentTerms, lcType, isLcIssued, issuingBank, confirmingBanks, productDescription, importerName, exporterName, confirmationCharges, lastDateForReceivingBids.\n
+If a field cannot be found, set its value to an empty string (\"\"). Do not add or remove keys. The JSON should be parseable by a JSON.parse call.\n
+Example output exactly (spacing/ordering may differ but must be valid JSON):\n{\n  "transactionRole": "",\n  "amount": "100.000,OO USD",\n  "paymentTerms": "100 PCT. VALUE OF GOODS SHIPPED",\n  "lcType": "IRREVOCABLE CONFIRMED LETTER OF CREDIT",\n  "isLcIssued": "",\n  "issuingBank": "HSBC",\n  "confirmingBanks": "",\n  "productDescription": "DOORES AND WINDOWS ACCESORY",\n  "importerName": "THE LIBYAN RUSSIAN UKRANIAN SPECIALIZED CENTER",\n  "exporterName": "FLUID LIMITED",\n  "confirmationCharges": "",\n  "lastDateForReceivingBids": ""\n}\n
+Always return only the JSON object (no commentary).`;
+     // Important: If you determine that you cannot reliably extract usable text from the input or cannot map
+     // the content to the requested fields, respond with the single word: error
+     // (that is the literal token: error -- lowercase, no punctuation, no explanation). This allows the caller
+     // to detect failure deterministically.
 
-    // Make a call to OpenAI GPT-4 to process the prompt and extracted OCR text
+    // Build user content depending on whether imageBase64 was provided
+    const userContent = imageBase64
+      ? `${prompt}\n\nIMAGE_BASE64:\n${imageBase64}\n\nPlease first extract the full text from the image (label it EXTRACTED_TEXT), then return ONLY the JSON mapping.`
+      : `${prompt}\n\nTEXT_INPUT:\n${data}\n\nReturn ONLY the JSON mapping.`;
+
+    // Call OpenAI to run the two-step instruction
     const response = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [
         { role: 'system', content: systemMessage },
-        { role: 'user', content: prompt },
-        { role: 'assistant', content: data }, // OCR data as input
+        { role: 'user', content: userContent },
       ],
     });
 
     const generatedText = response.choices?.[0]?.message?.content || '';
+
+    // Try to detect an EXTRACTED_TEXT block in the assistant reply for logging
+    let extractedTextFromAssistant: string | null = null;
+    try {
+      // 1) fenced code block after EXTRACTED_TEXT
+      const codeBlockMatch = generatedText.match(/EXTRACTED_TEXT\s*[:\-]?\s*```(?:\w*\n)?([\s\S]*?)```/i);
+      if (codeBlockMatch && codeBlockMatch[1]) {
+        extractedTextFromAssistant = codeBlockMatch[1].trim();
+      } else {
+        // 2) up to the next JSON object (assumes JSON starts with a '{')
+        const upToJsonMatch = generatedText.match(/EXTRACTED_TEXT\s*[:\-]?\s*([\s\S]*?)(?=\{)/i);
+        if (upToJsonMatch && upToJsonMatch[1]) {
+          extractedTextFromAssistant = upToJsonMatch[1].trim();
+        } else {
+          // 3) simple inline label
+          const simpleMatch = generatedText.match(/EXTRACTED_TEXT\s*[:\-]?\s*([\s\S]*)/i);
+          if (simpleMatch && simpleMatch[1]) {
+            extractedTextFromAssistant = simpleMatch[1].trim();
+          }
+        }
+      }
+    } catch (_e) {
+      // ignore extraction errors
+    }
+
+    if (extractedTextFromAssistant) {
+      console.log('EXTRACTED_TEXT (from assistant):', extractedTextFromAssistant.slice(0, 3000));
+    }
 
     // Try to parse JSON strictly, otherwise extract first JSON object in the reply
     const parsed = tryParseJSON(generatedText);
@@ -58,8 +100,20 @@ export async function POST(request: Request) {
       extractedFields = parseExtractedData(generatedText);
     }
 
-    // Return the processed fields as JSON
-    return NextResponse.json({ success: true, generatedText, extractedFields });
+    // Return the processed fields as JSON. Include extractedText and raw assistant reply when requested.
+    const resultPayload: Record<string, unknown> = {
+      success: true,
+      generatedText,
+      extractedFields,
+    };
+    if (extractedTextFromAssistant) resultPayload.extractedText = extractedTextFromAssistant;
+    // If the client requested debug, echo the raw assistant reply
+    const reqBody = await request.json().catch(() => ({}));
+    if (reqBody && typeof (reqBody as { debug?: unknown }).debug === 'boolean' && (reqBody as { debug?: boolean }).debug) {
+      resultPayload.rawAssistant = generatedText;
+    }
+
+    return NextResponse.json(resultPayload);
   } catch (err) {
     console.error('Error processing request in /api/ai:', err);
     return NextResponse.json({ success: false, message: 'AI processing error', error: String(err) }, { status: 500 });
